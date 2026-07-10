@@ -356,6 +356,8 @@ pr_commands = [
 [litellm]
 # use_client = false
 # drop_params = false
+# extra_headers = "" # JSON object of custom headers sent with every model request, e.g. '{"Authorization": "Bearer <token>", "Cookie": "aid=<id>"}'
+# extra_body = "" # JSON object of extra request-body fields. Allowed keys: processing_mode, service_tier, think (e.g. '{"think": true}' for Ollama reasoning models)
 enable_callbacks = false
 success_callback = []
 failure_callback = []
