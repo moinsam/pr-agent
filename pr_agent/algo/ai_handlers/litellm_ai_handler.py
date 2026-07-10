@@ -573,8 +573,16 @@ class LiteLLMAIHandler(BaseAiHandler):
 
                 #Added support for extra_headers while using litellm to call underlying model, via a api management gateway, would allow for passing custom headers for security and authorization
                 if get_settings().get("LITELLM.EXTRA_HEADERS", None):
+                    extra_headers_setting = get_settings().litellm.extra_headers
                     try:
-                        litellm_extra_headers = json.loads(get_settings().litellm.extra_headers)
+                        # Accept either a JSON string (e.g. from .secrets.toml) or an already-parsed
+                        # dict. Dynaconf may deserialize the value when it is provided via an
+                        # environment variable (the GitHub Action / secrets-manager path), in which
+                        # case json.loads would raise on a non-string input.
+                        if isinstance(extra_headers_setting, dict):
+                            litellm_extra_headers = extra_headers_setting
+                        else:
+                            litellm_extra_headers = json.loads(extra_headers_setting)
                         if not isinstance(litellm_extra_headers, dict):
                             raise ValueError("LITELLM.EXTRA_HEADERS must be a JSON object")
                     except json.JSONDecodeError as e:

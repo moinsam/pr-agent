@@ -93,11 +93,17 @@ def _process_litellm_extra_body(kwargs: dict) -> dict:
     Raises:
         ValueError: If extra_body contains invalid JSON, unsupported keys, or colliding keys
     """
-    allowed_extra_body_keys = {"processing_mode", "service_tier"}
+    allowed_extra_body_keys = {"processing_mode", "service_tier", "think"}
     extra_body = getattr(getattr(get_settings(), "litellm", None), "extra_body", None)
     if extra_body:
         try:
-            litellm_extra_body = json.loads(extra_body)
+            # Accept either a JSON string (e.g. from .secrets.toml) or an already-parsed
+            # dict. Dynaconf may deserialize the value when it is provided via an environment
+            # variable (the GitHub Action / secrets-manager path), so json.loads would fail on it.
+            if isinstance(extra_body, dict):
+                litellm_extra_body = extra_body
+            else:
+                litellm_extra_body = json.loads(extra_body)
             if not isinstance(litellm_extra_body, dict):
                 raise ValueError("LITELLM.EXTRA_BODY must be a JSON object")
             unsupported_keys = set(litellm_extra_body.keys()) - allowed_extra_body_keys
