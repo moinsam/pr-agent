@@ -106,6 +106,74 @@ By default, Ollama uses a context window size of 2048 tokens. In most cases this
 
 Please note that the `custom_model_max_tokens` setting should be configured in accordance with the `OLLAMA_CONTEXT_LENGTH`. Failure to do so may result in unexpected model output.
 
+#### Ollama Cloud (or any authenticated Ollama endpoint)
+
+A hosted Ollama endpoint (e.g. `https://ollama.com`) expects requests against `/api/chat` with an
+`Authorization: Bearer <token>` header. Use the **`ollama_chat/`** model prefix (this is the provider
+that maps to `/api/chat`, unlike `ollama/`, which uses `/api/generate`) and pass the auth token — plus
+any additional headers such as a session `Cookie` — through `litellm.extra_headers`:
+
+```toml
+[config]
+model = "ollama_chat/glm-4.6:cloud"
+fallback_models = ["ollama_chat/glm-4.6:cloud"]
+custom_model_max_tokens = 128000
+
+[ollama]
+api_base = "https://ollama.com" # base url only; the /api/chat path is added automatically
+
+[litellm]
+# Every header from the request goes here. This is the reliable way to supply the bearer token
+# together with a custom Cookie header, since the ollama api_key setting only covers the bearer.
+extra_headers = '{"Authorization": "Bearer <access-token>", "Cookie": "aid=<cookie-id>"}'
+# Optional: enable the model's reasoning ("think": true in the request body).
+extra_body = '{"think": true}'
+```
+
+##### Running it from a GitHub Action (keeping secrets out of the repo)
+
+When you cannot commit tokens to a settings file, provide every setting as an environment variable in
+the workflow and store only the sensitive values as **repository / organization Action secrets**
+(`Settings > Secrets and variables > Actions`). PR-Agent reads settings from env vars named
+`<section>.<key>`, so the same TOML above becomes:
+
+```yaml
+name: PR-Agent
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_agent_job:
+    runs-on: ubuntu-latest
+    name: Run PR-Agent on PRs
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: moinsam/pr-agent@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Ollama Cloud model configuration ---
+          config.model: "ollama_chat/glm-4.6:cloud"
+          config.fallback_models: '["ollama_chat/glm-4.6:cloud"]'
+          config.custom_model_max_tokens: "128000"
+          ollama.api_base: "https://ollama.com"
+          # Secrets are injected here; they never appear in the repo. The value is a JSON string,
+          # so wrap it in single quotes and interpolate the secrets inside it.
+          litellm.extra_headers: '{"Authorization": "Bearer ${{ secrets.OLLAMA_ACCESS_TOKEN }}", "Cookie": "aid=${{ secrets.OLLAMA_COOKIE_ID }}"}'
+          litellm.extra_body: '{"think": true}'
+```
+
+Add `OLLAMA_ACCESS_TOKEN` and `OLLAMA_COOKIE_ID` under the repository's Action secrets. `GITHUB_TOKEN`
+is provided automatically by GitHub Actions. Because the token and cookie are referenced only through
+`${{ secrets.* }}`, they stay masked in logs and are never stored in the codebase.
+
 !!! note "Local models vs commercial models"
     PR-Agent is compatible with almost any AI model, but analyzing complex code repositories and pull requests requires a model specifically optimized for code analysis.
 
