@@ -143,6 +143,11 @@ extra_instructions = ""
 [pr_code_suggestions] # /improve #
 commitable_code_suggestions = false
 dual_publishing_score_threshold=-1 # -1 to disable, [0-10] to set the threshold (>=) for publishing a code suggestion both in a table and as committable
+deduplicate_suggestions=true # suppress equivalent GitHub inline findings already raised by this installation
+dedup_include_resolved=true # include resolved and outdated review threads in duplicate detection
+dedup_honor_decisions=true # honor maintainer ignore, accepted-risk, and fixed thread decisions
+dedup_bot_logins=[] # optional exact bot login allowlist; empty uses the authenticated GitHub identity
+dedup_similarity_threshold=0.88 # deterministic legacy semantic/code similarity threshold, from 0.0 to 1.0
 focus_only_on_problems=true
 #
 extra_instructions = ""
@@ -396,6 +401,20 @@ utilize_auto_best_practices = true # public - disable usage of auto best practic
 extra_instructions = "" # public - extra instructions to the auto best practices generation prompt
 content = ""
 max_patterns = 5 # max number of patterns to be detected
+
+[artifacts]
+# Enable artifact injection into tool prompts (off by default; auto-enabled when artifact_path input is set)
+enable = false
+# File path to the artifact (relative to GITHUB_WORKSPACE, or absolute)
+artifact_path = ""
+# Custom instructions appended after the artifact content (leave empty for a sensible default)
+artifact_instructions = ""
+# Label shown to the AI — defaults to the filename when empty
+artifact_label = ""
+# Which tools receive artifact context
+target_tools = ["pr_reviewer", "pr_description", "pr_code_suggestions"]
+# Max artifact size in characters (content is truncated if exceeded)
+max_artifact_size = 50000
 
 [azure_devops]
 default_comment_status = "closed"

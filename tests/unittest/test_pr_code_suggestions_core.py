@@ -4,6 +4,7 @@ import pytest
 
 from pr_agent.algo.types import FilePatchInfo
 from pr_agent.config_loader import get_settings
+from pr_agent.git_providers.github_provider import GithubProvider
 from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions
 
 
@@ -180,3 +181,72 @@ async def test_push_inline_code_suggestions_falls_back_to_individual_publish_cal
     assert second_retry[0]["relevant_lines_start"] == 2
     assert second_retry[0]["relevant_lines_end"] == 2
     assert "```suggestion\n    return new_worker()" in second_retry[0]["body"]
+
+
+def _make_github_provider_for_dedup(history):
+    provider = GithubProvider.__new__(GithubProvider)
+    provider.diff_files = [
+        FilePatchInfo(base_file="", head_file="return old()\n", patch="", filename="app.py")
+    ]
+    provider.get_code_suggestion_history = MagicMock(return_value=history)
+    provider.publish_code_suggestions = MagicMock(return_value=True)
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_adds_marker_and_reuses_history_for_dual_publication_path():
+    history = {"comments": [], "thread_states": {}, "bot_login": "pr-agent[bot]"}
+    provider = _make_github_provider_for_dedup(history)
+    tool = _make_tool(provider)
+    data = {"code_suggestions": [_valid_suggestion(score=8)]}
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.get("deduplicate_suggestions", True)
+    previous_threshold = settings.pr_code_suggestions.dual_publishing_score_threshold
+    settings.pr_code_suggestions.deduplicate_suggestions = True
+    settings.pr_code_suggestions.dual_publishing_score_threshold = 1
+    try:
+        # Exercise the direct committable path, followed by the table mode's dual-publishing path.
+        await tool.push_inline_code_suggestions(data)
+        await tool.dual_publishing(data)
+    finally:
+        settings.pr_code_suggestions.deduplicate_suggestions = previous
+        settings.pr_code_suggestions.dual_publishing_score_threshold = previous_threshold
+
+    assert provider.get_code_suggestion_history.call_count == 1
+    assert provider.publish_code_suggestions.call_count == 2
+    assert "<!-- pr-agent-finding:" in provider.publish_code_suggestions.call_args.args[0][0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_api_failure_fails_open():
+    provider = _make_github_provider_for_dedup({})
+    provider.get_code_suggestion_history.side_effect = RuntimeError("GraphQL unavailable")
+    tool = _make_tool(provider)
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.get("deduplicate_suggestions", True)
+    settings.pr_code_suggestions.deduplicate_suggestions = True
+    try:
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+    finally:
+        settings.pr_code_suggestions.deduplicate_suggestions = previous
+
+    assert provider.get_code_suggestion_history.call_count == 1
+    assert provider.publish_code_suggestions.call_count == 2
+    assert "pr-agent-finding" not in provider.publish_code_suggestions.call_args.args[0][0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_configuration_disabled_skips_retrieval():
+    provider = _make_github_provider_for_dedup({})
+    tool = _make_tool(provider)
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.get("deduplicate_suggestions", True)
+    settings.pr_code_suggestions.deduplicate_suggestions = False
+    try:
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+    finally:
+        settings.pr_code_suggestions.deduplicate_suggestions = previous
+
+    provider.get_code_suggestion_history.assert_not_called()
+    assert provider.publish_code_suggestions.call_count == 1

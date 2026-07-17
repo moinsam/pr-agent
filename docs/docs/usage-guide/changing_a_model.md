@@ -163,6 +163,7 @@ jobs:
           config.model: "ollama_chat/glm-4.6:cloud"
           config.fallback_models: '["ollama_chat/glm-4.6:cloud"]'
           config.custom_model_max_tokens: "128000"
+          config.verbosity_level: "2"
           ollama.api_base: "https://ollama.com"
           # Secrets are injected here; they never appear in the repo. The value is a JSON string,
           # so wrap it in single quotes and interpolate the secrets inside it.
