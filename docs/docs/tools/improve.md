@@ -81,6 +81,35 @@ Teams with specific preferences can enable committable code comments mode in the
 
 > `Note - due to platform limitations, Bitbucket cloud and server supports only committable code comments mode.`
 
+### Duplicate suggestion suppression on GitHub
+
+GitHub inline suggestions are deduplicated by default. Before publishing, PR-Agent fetches all review comments (including
+outdated comments and replies) and review-thread resolution state. It considers only root findings from the authenticated
+PR-Agent bot, or from the exact logins configured in `dedup_bot_logins`. A hidden fingerprint marker is added to each new
+inline finding. The fingerprint combines the normalized repository-relative path, finding title/category/message, and the
+relevant symbol or nearby code, so it does not depend on line numbers.
+
+Equivalent unresolved and resolved findings are suppressed by default. Maintainers can also reply in a thread with one of
+these case-insensitive commands on its own line:
+
+- `pr-agent: ignore`
+- `pr-agent: accepted-risk`
+- `pr-agent: fixed`
+
+Commands from the bot itself or from users GitHub does not identify as repository owners, members, or collaborators are
+ignored. `ignore` and `accepted-risk` remain suppressed until the relevant semantic/code context materially changes.
+`fixed` records that the finding was addressed; if later analysis finds that problematic context again, it is treated as a
+reintroduction and may be published again.
+
+Older PR-Agent comments have no marker. For those, matching is best effort and deterministic: the path must match, then the
+normalized body and diff-hunk/nearby code are compared with a bounded similarity threshold. Major wording changes or
+unavailable historical hunks can prevent a legacy match. If REST or GraphQL history retrieval fails, PR-Agent logs the
+failure and publishes normally. The discussion history is not sent to the model.
+
+`extra_instructions` alone cannot provide this memory: previous review discussions are not part of the `/improve` model
+prompt. Deduplication therefore happens in code immediately before inline publication and applies to both committable and
+dual-published suggestions.
+
 
 ## `Extra instructions` and `best practices`
 
@@ -308,6 +337,26 @@ Note: Chunking is primarily relevant for large PRs. For most PRs (up to 600 line
       <tr>
         <td><b>dual_publishing_score_threshold</b></td>
         <td>Minimum score threshold for suggestions to be presented as committable PR comments in addition to the table. Default is -1 (disabled).</td>
+      </tr>
+      <tr>
+        <td><b>deduplicate_suggestions</b></td>
+        <td>Suppress equivalent GitHub inline findings previously published by PR-Agent. Default is true.</td>
+      </tr>
+      <tr>
+        <td><b>dedup_include_resolved</b></td>
+        <td>Include resolved and outdated GitHub review threads when matching prior findings. Default is true.</td>
+      </tr>
+      <tr>
+        <td><b>dedup_honor_decisions</b></td>
+        <td>Honor supported maintainer decision commands in thread replies. Default is true.</td>
+      </tr>
+      <tr>
+        <td><b>dedup_bot_logins</b></td>
+        <td>Optional exact list of bot logins whose root comments are recognized. When empty, the authenticated GitHub identity is used where available. Default is empty.</td>
+      </tr>
+      <tr>
+        <td><b>dedup_similarity_threshold</b></td>
+        <td>Legacy normalized body/code similarity threshold from 0.0 to 1.0. Default is 0.88.</td>
       </tr>
       <tr>
         <td><b>focus_only_on_problems</b></td>

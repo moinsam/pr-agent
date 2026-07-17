@@ -160,6 +160,11 @@ extra_instructions = ""
 [pr_code_suggestions] # /improve #
 commitable_code_suggestions = false
 dual_publishing_score_threshold=-1 # -1 to disable, [0-10] to set the threshold (>=) for publishing a code suggestion both in a table and as committable
+deduplicate_suggestions=true # suppress equivalent GitHub inline findings already raised by this installation
+dedup_include_resolved=true # include resolved and outdated review threads in duplicate detection
+dedup_honor_decisions=true # honor maintainer ignore, accepted-risk, and fixed thread decisions
+dedup_bot_logins=[] # optional exact bot login allowlist; empty uses the authenticated GitHub identity
+dedup_similarity_threshold=0.88 # deterministic legacy semantic/code similarity threshold, from 0.0 to 1.0
 focus_only_on_problems=true
 #
 extra_instructions = ""

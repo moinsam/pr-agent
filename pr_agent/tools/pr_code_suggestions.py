@@ -31,6 +31,8 @@ from pr_agent.git_providers import (AzureDevopsProvider, GithubProvider,
 from pr_agent.git_providers.git_provider import get_main_pr_language, GitProvider
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
+from pr_agent.tools.github_suggestion_dedup import (filter_duplicate_suggestions,
+                                                    marker_for)
 from pr_agent.tools.pr_description import insert_br_after_x_chars
 from pr_agent.tools.progress_comment import build_progress_comment
 
@@ -561,7 +563,30 @@ class PRCodeSuggestions:
     async def push_inline_code_suggestions(self, data):
         code_suggestions = []
 
-        if not data['code_suggestions']:
+        suggestions = data['code_suggestions']
+        if (isinstance(self.git_provider, GithubProvider) and
+                get_settings().pr_code_suggestions.get('deduplicate_suggestions', True)):
+            if not getattr(self, '_code_suggestion_dedup_failed', False):
+                try:
+                    if not hasattr(self, '_code_suggestion_history'):
+                        self._code_suggestion_history = self.git_provider.get_code_suggestion_history()
+                    suggestions = filter_duplicate_suggestions(
+                        suggestions,
+                        self._code_suggestion_history,
+                        bot_logins=list(get_settings().pr_code_suggestions.get('dedup_bot_logins', [])),
+                        include_resolved=get_settings().pr_code_suggestions.get('dedup_include_resolved', True),
+                        honor_decisions=get_settings().pr_code_suggestions.get('dedup_honor_decisions', True),
+                        similarity_threshold=float(
+                            get_settings().pr_code_suggestions.get('dedup_similarity_threshold', 0.88)),
+                    )
+                    get_logger().info(
+                        f"Suppressed {len(data['code_suggestions']) - len(suggestions)} duplicate code suggestions")
+                except Exception as e:
+                    self._code_suggestion_dedup_failed = True
+                    get_logger().exception("Failed to deduplicate GitHub code suggestions; publishing normally",
+                                           artifact={"error": e})
+
+        if not suggestions:
             get_logger().info('No suggestions found to improve this PR.')
             if self.progress_response:
                 return self.git_provider.edit_comment(self.progress_response,
@@ -569,7 +594,7 @@ class PRCodeSuggestions:
             else:
                 return self.git_provider.publish_comment('No suggestions found to improve this PR.')
 
-        for d in data['code_suggestions']:
+        for d in suggestions:
             try:
                 if get_settings().config.verbosity_level >= 2:
                     get_logger().info(f"suggestion: {d}")
@@ -587,6 +612,8 @@ class PRCodeSuggestions:
                     body = f"**Suggestion:** {content} [{label}, importance: {d.get('score')}]\n```suggestion\n" + new_code_snippet + "\n```"
                 else:
                     body = f"**Suggestion:** {content} [{label}]\n```suggestion\n" + new_code_snippet + "\n```"
+                if d.get('finding_fingerprint'):
+                    body += f"\n\n{marker_for(d['finding_fingerprint'])}"
                 code_suggestions.append({'body': body, 'relevant_file': relevant_file,
                                          'relevant_lines_start': relevant_lines_start,
                                          'relevant_lines_end': relevant_lines_end,
