@@ -563,6 +563,73 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to get review comments for an inline ask command", artifact={"comment_id": comment_id, "error": e})
             return []
 
+    def get_code_suggestion_history(self) -> dict:
+        """Return review comments and thread state used by GitHub /improve deduplication."""
+        comments = []
+        for comment in self.pr.get_comments():
+            raw = getattr(comment, "raw_data", {}) or {}
+            user = raw.get("user", {}) or {}
+            comments.append({
+                "id": raw.get("id", getattr(comment, "id", None)),
+                "in_reply_to_id": raw.get("in_reply_to_id"),
+                "body": raw.get("body", getattr(comment, "body", "")),
+                "path": raw.get("path", getattr(comment, "path", "")),
+                "diff_hunk": raw.get("diff_hunk", getattr(comment, "diff_hunk", "")),
+                "author_login": user.get("login", getattr(getattr(comment, "user", None), "login", "")),
+                "author_association": raw.get("author_association", ""),
+            })
+
+        owner, repo = self.repo.split("/", 1)
+        thread_states = {}
+        cursor = None
+        while True:
+            query = """
+            query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100, after: $cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      isResolved
+                      isOutdated
+                      comments(first: 1) { nodes { databaseId } }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            response = self.github_client._Github__requester.requestJson("POST", "/graphql", input={
+                "query": query,
+                "variables": {"owner": owner, "repo": repo, "number": int(self.pr_num), "cursor": cursor},
+            })
+            payload = json.loads(response[2]) if isinstance(response, tuple) else response
+            if payload.get("errors"):
+                raise RuntimeError(f"GitHub GraphQL returned errors: {payload['errors']}")
+            threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+            for thread in threads.get("nodes", []):
+                root_nodes = thread.get("comments", {}).get("nodes", [])
+                if root_nodes and root_nodes[0].get("databaseId") is not None:
+                    thread_states[root_nodes[0]["databaseId"]] = {
+                        "resolved": bool(thread.get("isResolved")),
+                        "outdated": bool(thread.get("isOutdated")),
+                    }
+            page_info = threads.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+        bot_login = getattr(self, "github_user_id", None)
+        if not bot_login:
+            try:
+                bot_login = self.github_client.get_user().raw_data.get("login", "")
+            except Exception:
+                # Installation tokens cannot normally call GET /user. A configured GitHub App slug maps exactly to
+                # its bot account login and is safer than accepting arbitrary accounts with a Bot user type.
+                app_name = str(get_settings().get("GITHUB.APP_NAME", "")).strip()
+                bot_login = f"{app_name}[bot]" if app_name else ""
+        return {"comments": comments, "thread_states": thread_states, "bot_login": bot_login}
+
     def _publish_inline_comments_fallback_with_verification(self, comments: list[dict]):
         """
         Check each inline comment separately against the GitHub API and discard of invalid comments,
