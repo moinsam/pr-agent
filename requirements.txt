@@ -8,7 +8,7 @@ boto3==1.40.45
 certifi==2024.8.30
 dynaconf==3.2.4
 fastapi==0.118.0
-GitPython==3.1.41
+GitPython==3.1.52
 google-cloud-aiplatform==1.154.0
 # google-cloud-aiplatform==1.154.0 requires storage <4,>=1.32.0 on py<3.13 and <4,>=3.10.0 on py>=3.13.
 # Pin per-Python (exact, like the rest of this file) so existing installs are unchanged and py3.13 resolves. See #2480.
