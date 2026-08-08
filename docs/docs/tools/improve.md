@@ -89,8 +89,10 @@ PR-Agent bot, or from the exact logins configured in `dedup_bot_logins`. A hidde
 inline finding. The fingerprint combines the normalized repository-relative path, finding title/category/message, and the
 relevant symbol or nearby code, so it does not depend on line numbers.
 
-Equivalent unresolved and resolved findings are suppressed by default. Maintainers can also reply in a thread with one of
-these case-insensitive commands on its own line:
+With `dedup_include_resolved=false`, equivalent unresolved findings are suppressed, including open threads whose original
+diff position GitHub has marked outdated. Resolved findings are reviewed again on the next run: if the issue remains or is
+reintroduced, PR-Agent may publish a new thread. Maintainers can also reply in a thread with one of these case-insensitive
+commands on its own line:
 
 - `pr-agent: ignore`
 - `pr-agent: accepted-risk`
@@ -99,12 +101,16 @@ these case-insensitive commands on its own line:
 Commands from the bot itself or from users GitHub does not identify as repository owners, members, or collaborators are
 ignored. `ignore` and `accepted-risk` remain suppressed until the relevant semantic/code context materially changes.
 `fixed` records that the finding was addressed; if later analysis finds that problematic context again, it is treated as a
-reintroduction and may be published again.
+reintroduction and may be published again. Resolving a GitHub thread does not mean accepted risk; use `ignore` or
+`accepted-risk` before resolving when that decision should remain durable.
 
-Older PR-Agent comments have no marker. For those, matching is best effort and deterministic: the path must match, then the
-normalized body and diff-hunk/nearby code are compared with a bounded similarity threshold. Major wording changes or
-unavailable historical hunks can prevent a legacy match. If REST or GraphQL history retrieval fails, PR-Agent logs the
-failure and publishes normally. The discussion history is not sent to the model.
+Matching is deterministic: the path must match, then the hidden fingerprint and normalized body and diff-hunk/nearby code
+are compared with a bounded similarity threshold. The similarity fallback also handles marked comments when model wording
+changes between runs. Major wording and code changes can still represent a new finding. If REST or GraphQL history
+retrieval fails, PR-Agent logs the failure and publishes normally. The discussion history is not sent to the model.
+
+For GitHub Actions, set `dedup_bot_logins=["github-actions[bot]"]`. For a custom bot or a migration from another bot
+identity, set it to an exact allowlist of the accounts whose prior root comments should be considered.
 
 `extra_instructions` alone cannot provide this memory: previous review discussions are not part of the `/improve` model
 prompt. Deduplication therefore happens in code immediately before inline publication and applies to both committable and

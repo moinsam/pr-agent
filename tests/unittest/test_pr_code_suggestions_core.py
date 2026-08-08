@@ -5,6 +5,7 @@ import pytest
 from pr_agent.algo.types import FilePatchInfo
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.github_provider import GithubProvider
+from pr_agent.tools.github_suggestion_dedup import finding_fingerprint, marker_for
 from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions
 
 
@@ -277,3 +278,32 @@ async def test_inline_dedup_configuration_disabled_skips_retrieval():
 
     provider.get_code_suggestion_history.assert_not_called()
     assert provider.publish_code_suggestions.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_suppresses_empty_output_when_configured():
+    item = _valid_suggestion()
+    history = {
+        "comments": [{
+            "id": 1,
+            "in_reply_to_id": None,
+            "body": marker_for(finding_fingerprint(item)),
+            "path": item["relevant_file"],
+            "diff_hunk": item["existing_code"],
+            "author_login": "pr-agent[bot]",
+            "author_association": "NONE",
+        }],
+        "thread_states": {1: {"resolved": False, "outdated": False}},
+        "bot_login": "pr-agent[bot]",
+    }
+    provider = _make_github_provider_for_dedup(history)
+    tool = _make_tool(provider)
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.publish_output_no_suggestions
+    settings.pr_code_suggestions.publish_output_no_suggestions = False
+    try:
+        await tool.push_inline_code_suggestions({"code_suggestions": [item]})
+    finally:
+        settings.pr_code_suggestions.publish_output_no_suggestions = previous
+
+    provider.publish_code_suggestions.assert_not_called()

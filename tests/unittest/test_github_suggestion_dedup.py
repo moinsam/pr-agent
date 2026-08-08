@@ -36,10 +36,15 @@ def comment(item, *, comment_id=1, body=None, path=None, diff_hunk=None, author=
     }
 
 
+def rendered_comment_body(item):
+    return (f"**Suggestion:** {item['suggestion_content']} [{item['label']}]\n"
+            f"```suggestion\n{item['improved_code']}\n```\n\n{marker_for(finding_fingerprint(item))}")
+
+
 def apply_filter(items, comments, *, states=None, **options):
     history = {"comments": comments, "thread_states": states or {}, "bot_login": "pr-agent[bot]"}
-    defaults = {"bot_logins": [], "include_resolved": True, "honor_decisions": True,
-                "similarity_threshold": 0.75}
+    defaults = {"bot_logins": [], "include_resolved": False, "honor_decisions": True,
+                "similarity_threshold": 0.82}
     defaults.update(options)
     return filter_duplicate_suggestions(items, history, **defaults)
 
@@ -67,15 +72,22 @@ def test_distinct_findings_in_same_file_are_not_suppressed():
 def test_resolved_finding_obeys_configuration():
     item = suggestion()
     states = {1: {"resolved": True, "outdated": True}}
-    assert apply_filter([item], [comment(item)], states=states) == []
-    assert len(apply_filter([item], [comment(item)], states=states, include_resolved=False)) == 1
+    assert len(apply_filter([item], [comment(item)], states=states)) == 1
+    assert apply_filter([item], [comment(item)], states=states, include_resolved=True) == []
 
 
-def test_outdated_unresolved_finding_obeys_configuration():
+def test_outdated_unresolved_finding_remains_suppressed():
     item = suggestion()
     states = {1: {"resolved": False, "outdated": True}}
     assert apply_filter([item], [comment(item)], states=states) == []
-    assert len(apply_filter([item], [comment(item)], states=states, include_resolved=False)) == 1
+    assert apply_filter([item], [comment(item)], states=states, include_resolved=False) == []
+
+
+def test_marked_finding_uses_similarity_fallback_when_model_rephrases_it():
+    old = suggestion(suggestion_content="Use the shared helper.")
+    new = suggestion(suggestion_content="Reuse the shared helper.")
+    assert finding_fingerprint(old) != finding_fingerprint(new)
+    assert apply_filter([new], [comment(old, body=rendered_comment_body(old))]) == []
 
 
 @pytest.mark.parametrize("command", ["ignore", "accepted-risk"])
@@ -91,6 +103,15 @@ def test_fixed_allows_reintroduced_finding():
     reply = comment(item, comment_id=2, reply_to=1, author="maintainer", association="OWNER",
                     body="pr-agent: fixed")
     assert len(apply_filter([item], [comment(item), reply])) == 1
+
+
+def test_accepted_risk_survives_nearby_code_changes():
+    old = suggestion(existing_code="return old()")
+    new = suggestion(existing_code="value = prepare()\nreturn old(value, strict=True)")
+    reply = comment(old, comment_id=2, reply_to=1, author="maintainer", association="OWNER",
+                    body="pr-agent: accepted-risk")
+    assert finding_fingerprint(old) != finding_fingerprint(new)
+    assert apply_filter([new], [comment(old, body=rendered_comment_body(old)), reply]) == []
 
 
 def test_bot_authored_command_is_ignored():
