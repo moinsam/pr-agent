@@ -147,6 +147,18 @@ def _legacy_equivalent(parts: tuple[str, str, str], prior: PriorFinding, thresho
     return semantic_ratio >= threshold and (context_match or not context or not prior.context)
 
 
+def _decision_equivalent(parts: tuple[str, str, str], prior: PriorFinding, threshold: float) -> bool:
+    """Match a durable maintainer decision even when nearby code has moved or changed."""
+    path, semantic, _ = parts
+    if not path or path != prior.path or not semantic or not prior.semantic:
+        return False
+    semantic_tokens = set(semantic.split())
+    prior_tokens = set(prior.semantic.split())
+    token_ratio = len(semantic_tokens & prior_tokens) / max(len(semantic_tokens), len(prior_tokens))
+    semantic_ratio = max(SequenceMatcher(None, semantic, prior.semantic, autojunk=False).ratio(), token_ratio)
+    return semantic_ratio >= threshold
+
+
 def filter_duplicate_suggestions(suggestions: list[dict[str, Any]], history: dict[str, Any], *,
                                  bot_logins: list[str], include_resolved: bool,
                                  honor_decisions: bool, similarity_threshold: float) -> list[dict[str, Any]]:
@@ -158,16 +170,18 @@ def filter_duplicate_suggestions(suggestions: list[dict[str, Any]], history: dic
         legacy_parts = legacy_finding_parts(suggestion)
         suppress = False
         for prior in prior_findings:
-            equivalent = (prior.fingerprint == fingerprint if prior.fingerprint
-                          else _legacy_equivalent(legacy_parts, prior, threshold))
-            if not equivalent:
-                continue
-            # A generated finding means the problematic context is present. A previous "fixed" decision therefore
-            # does not suppress a reintroduced finding; ignore and accepted-risk decisions remain durable.
+            equivalent = prior.fingerprint == fingerprint or _legacy_equivalent(legacy_parts, prior, threshold)
             durable_decision = prior.decision in {"ignore", "accepted-risk"}
-            historical_thread = prior.resolved or prior.outdated
+            decision_equivalent = equivalent or (
+                durable_decision and _decision_equivalent(legacy_parts, prior, threshold)
+            )
+            if not equivalent and not decision_equivalent:
+                continue
+            # Open threads remain authoritative even when GitHub marks their original diff position as outdated.
+            # Resolved threads are rechecked by default, while explicit ignore/accepted-risk decisions are durable.
+            # A "fixed" decision never suppresses a finding that analysis detects again.
             suppress = durable_decision or (
-                prior.decision != "fixed" and (include_resolved or not historical_thread)
+                equivalent and prior.decision != "fixed" and (include_resolved or not prior.resolved)
             )
             if suppress:
                 break
