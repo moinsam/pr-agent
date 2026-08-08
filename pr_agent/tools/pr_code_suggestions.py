@@ -573,6 +573,8 @@ class PRCodeSuggestions:
 
         if not suggestions:
             get_logger().info('No suggestions found to improve this PR.')
+            if not get_settings().pr_code_suggestions.get('publish_output_no_suggestions', True):
+                return None
             if self.progress_response:
                 return self.git_provider.edit_comment(self.progress_response,
                                                       body='No suggestions found to improve this PR.')
