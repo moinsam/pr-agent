@@ -14,7 +14,7 @@ inputs:
     default: ''
 runs:
   using: 'docker'
-  image: 'Dockerfile.github_action_dockerhub'
+  image: 'Dockerfile.github_action'
   env:
     ARTIFACT_PATH: ${{ inputs.artifact_path }}
     ARTIFACT_INSTRUCTIONS: ${{ inputs.artifact_instructions }}
