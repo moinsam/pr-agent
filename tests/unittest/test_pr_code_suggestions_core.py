@@ -536,3 +536,42 @@ async def test_inline_dedup_suppresses_empty_output_when_configured():
         settings.pr_code_suggestions.publish_output_no_suggestions = previous
 
     provider.publish_code_suggestions.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_publishes_both_marker_kinds():
+    provider = _make_github_provider_for_dedup({"comments": [], "thread_states": {}, "bot_login": "pr-agent[bot]"})
+    tool = _make_tool(provider)
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.get("deduplicate_suggestions", True)
+    settings.pr_code_suggestions.deduplicate_suggestions = True
+    try:
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+    finally:
+        settings.pr_code_suggestions.deduplicate_suggestions = previous
+
+    body = provider.publish_code_suggestions.call_args.args[0][0]["body"]
+    assert "<!-- pr-agent-finding:" in body
+    assert "<!-- pr-agent-finding-code:" in body
+
+
+@pytest.mark.asyncio
+async def test_inline_dedup_fail_closed_skips_publication_for_the_whole_run():
+    provider = _make_github_provider_for_dedup({})
+    provider.get_code_suggestion_history.side_effect = RuntimeError("GraphQL unavailable")
+    tool = _make_tool(provider)
+    settings = get_settings()
+    previous = settings.pr_code_suggestions.get("deduplicate_suggestions", True)
+    previous_fail_closed = settings.pr_code_suggestions.get("dedup_fail_closed", False)
+    settings.pr_code_suggestions.deduplicate_suggestions = True
+    settings.pr_code_suggestions.dedup_fail_closed = True
+    try:
+        # The second call covers the already-failed short circuit, which must not publish either.
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+        await tool.push_inline_code_suggestions({"code_suggestions": [_valid_suggestion()]})
+    finally:
+        settings.pr_code_suggestions.deduplicate_suggestions = previous
+        settings.pr_code_suggestions.dedup_fail_closed = previous_fail_closed
+
+    assert provider.get_code_suggestion_history.call_count == 1
+    provider.publish_code_suggestions.assert_not_called()

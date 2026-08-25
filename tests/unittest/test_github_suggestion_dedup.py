@@ -5,9 +5,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from pr_agent.git_providers.github_provider import GithubProvider
-from pr_agent.tools.github_suggestion_dedup import (filter_duplicate_suggestions,
+from pr_agent.tools.github_suggestion_dedup import (code_finding_fingerprint,
+                                                    code_marker_for,
+                                                    filter_duplicate_suggestions,
                                                     finding_fingerprint,
-                                                    marker_for)
+                                                    marker_for,
+                                                    preserved_markers)
 
 
 def suggestion(**overrides):
@@ -212,3 +215,111 @@ def test_provider_rest_error_is_raised_for_caller_fail_open():
     provider.pr = SimpleNamespace(get_comments=MagicMock(side_effect=RuntimeError("REST unavailable")))
     with pytest.raises(RuntimeError):
         provider.get_code_suggestion_history()
+
+
+def code_marked_comment(item, **overrides):
+    return comment(item, body=code_marker_for(code_finding_fingerprint(item)), **overrides)
+
+
+def test_code_fingerprint_survives_a_completely_rewritten_message():
+    old = suggestion()
+    new = suggestion(one_sentence_summary="Route the call through the shared abstraction",
+                     suggestion_content="This duplicates logic that the shared helper already owns.")
+    assert finding_fingerprint(old) != finding_fingerprint(new)
+    assert code_finding_fingerprint(old) == code_finding_fingerprint(new)
+    assert apply_filter([new], [code_marked_comment(old)]) == []
+
+
+def test_code_fingerprint_is_absent_without_code_to_hash():
+    assert code_finding_fingerprint(suggestion(existing_code="", improved_code="")) is None
+    assert code_finding_fingerprint(suggestion(relevant_file="")) is None
+
+
+def test_filter_exposes_both_fingerprints_for_marker_rendering():
+    published = apply_filter([suggestion()], [])[0]
+    assert published["finding_fingerprint"] == finding_fingerprint(suggestion())
+    assert published["finding_code_fingerprint"] == code_finding_fingerprint(suggestion())
+
+
+def test_suggestion_without_code_still_publishes_a_prose_fingerprint_only():
+    item = suggestion(existing_code="", improved_code="")
+    published = apply_filter([item], [])[0]
+    assert "finding_code_fingerprint" not in published
+
+
+LONG_FIX = ("if not current_user.has_account_access(account_id):\n"
+            "    raise Forbidden('account scope mismatch')")
+
+
+def test_substantial_fix_matches_on_code_when_prose_diverges():
+    old = suggestion(improved_code=LONG_FIX, suggestion_content="Scope the query to the account.")
+    new = suggestion(improved_code=LONG_FIX, suggestion_content="Reject requests for other accounts.",
+                     existing_code="return Ledger.query.get(ledger_id)")
+    body = f"**Suggestion:** {old['suggestion_content']} [bug]\n```suggestion\n{LONG_FIX}\n```"
+    assert apply_filter([new], [comment(old, body=body)]) == []
+
+
+def test_short_fix_alone_does_not_suppress_an_unrelated_location():
+    old = suggestion()
+    new = suggestion(one_sentence_summary="Unrelated cache defect",
+                     suggestion_content="Scope the cache key to the tenant.",
+                     existing_code="cache.set(key, value)")
+    body = f"**Suggestion:** {old['suggestion_content']} [bug]\n```suggestion\n{old['improved_code']}\n```"
+    prior = comment(old, body=body, diff_hunk="@@ -1,2 +1,2 @@ def run():\n-return old()\n+return shared()")
+    assert len(apply_filter([new], [prior])) == 1
+
+
+def test_short_code_marker_does_not_suppress_an_unrelated_location():
+    old = suggestion()
+    new = suggestion(one_sentence_summary="Unrelated cache defect",
+                     suggestion_content="Scope the cache key to the tenant.",
+                     existing_code="cache.set(key, value)")
+    prior = code_marked_comment(
+        old,
+        diff_hunk="@@ -1,2 +1,2 @@ def run():\n-return old()\n+return shared()",
+    )
+    assert len(apply_filter([new], [prior])) == 1
+
+
+def test_transformed_out_of_hunk_comment_is_matched_through_its_diff_block():
+    old = suggestion(improved_code=LONG_FIX)
+    new = suggestion(improved_code=LONG_FIX, suggestion_content="Enforce account scoping here.",
+                     existing_code="return Ledger.query.get(ledger_id)")
+    transformed = ("**Suggestion:** Scope the query. [bug, importance: 9]\n\n"
+                   "<details><summary>New proposed code:</summary>\n\n```diff\n"
+                   "-return Ledger.query.get(ledger_id)\n"
+                   + "\n".join(f"+{line}" for line in LONG_FIX.splitlines())
+                   + "\n```\n\n</details>")
+    assert apply_filter([new], [comment(old, body=transformed)]) == []
+
+
+def test_details_block_does_not_hide_a_marker_from_the_prose_fingerprint():
+    item = suggestion()
+    body = (f"**Suggestion:** anything [bug]\n\n<details><summary>New proposed code:</summary>\n\n"
+            f"```diff\n+return shared()\n```\n\n{marker_for(finding_fingerprint(item))}\n\n</details>")
+    assert apply_filter([item], [comment(item, body=body)]) == []
+
+
+def test_malformed_code_marker_is_ignored():
+    item = suggestion()
+    malformed = comment(item, body="<!-- pr-agent-finding-code: not-a-hash -->")
+    assert len(apply_filter([item], [malformed])) == 1
+
+
+def test_preserved_markers_round_trip_both_marker_kinds():
+    item = suggestion()
+    prose, code = finding_fingerprint(item), code_finding_fingerprint(item)
+    body = f"**Suggestion:** x\n```suggestion\ny\n```\n\n{marker_for(prose)}\n{code_marker_for(code)}"
+    assert preserved_markers(body) == f"{marker_for(prose)}\n{code_marker_for(code)}"
+    assert preserved_markers("no markers here") == ""
+
+
+def test_truncating_fallback_keeps_markers_matchable():
+    item = suggestion()
+    provider = GithubProvider.__new__(GithubProvider)
+    body = (f"**Suggestion:** Use the shared helper. [maintainability]\n"
+            f"```suggestion\nreturn shared()\n```\n\n"
+            f"{marker_for(finding_fingerprint(item))}\n{code_marker_for(code_finding_fingerprint(item))}")
+    fixed = provider._try_fix_invalid_inline_comments([{"body": body, "start_line": 3, "start_side": "RIGHT"}])
+    assert "```suggestion" not in fixed[0]["body"]
+    assert apply_filter([item], [comment(item, body=fixed[0]["body"])]) == []
