@@ -69,6 +69,10 @@ class LiteLLMAIHandler(BaseAiHandler):
             # provider env vars (OPENROUTER_API_KEY, AZURE_API_KEY, ...) in LiteLLM's
             # resolution chain, so a placeholder there silently shadows them.
             litellm.openai_key = DUMMY_LITELLM_API_KEY
+        # Custom Bedrock endpoint (e.g. a VPC endpoint interface endpoint); litellm reads this
+        # directly from the environment regardless of the credentials model below
+        if not os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT") and get_settings().get("aws.AWS_BEDROCK_RUNTIME_ENDPOINT"):
+            os.environ["AWS_BEDROCK_RUNTIME_ENDPOINT"] = get_settings().aws.AWS_BEDROCK_RUNTIME_ENDPOINT
         if os.environ.get("AWS_USE_IMDS", "").strip().lower() in ("1", "true", "yes"):
             import boto3
             import botocore.exceptions
@@ -201,6 +205,25 @@ class LiteLLMAIHandler(BaseAiHandler):
         # Support deepseek models
         if get_settings().get("DEEPSEEK.KEY", None):
             os.environ['DEEPSEEK_API_KEY'] = get_settings().get("DEEPSEEK.KEY")
+
+        # Support GLM (Z.AI / Zhipu) models
+        if get_settings().get("ZAI.KEY", None):
+            os.environ['ZAI_API_KEY'] = get_settings().get("ZAI.KEY")
+
+        # Support Moonshot (Kimi) models
+        if get_settings().get("MOONSHOT.KEY", None):
+            os.environ['MOONSHOT_API_KEY'] = get_settings().get("MOONSHOT.KEY")
+        # Optional Moonshot endpoint override (e.g. China: https://api.moonshot.cn/v1)
+        if get_settings().get("MOONSHOT.API_BASE", None):
+            os.environ['MOONSHOT_API_BASE'] = get_settings().get("MOONSHOT.API_BASE")
+
+        # Support Qwen (Alibaba DashScope) models
+        if get_settings().get("DASHSCOPE.KEY", None):
+            os.environ['DASHSCOPE_API_KEY'] = get_settings().get("DASHSCOPE.KEY")
+
+        # Support Xiaomi MiMo models
+        if get_settings().get("XIAOMI_MIMO.KEY", None):
+            os.environ['XIAOMI_MIMO_API_KEY'] = get_settings().get("XIAOMI_MIMO.KEY")
 
         # Support deepinfra models
         if get_settings().get("DEEPINFRA.KEY", None):
@@ -380,26 +403,33 @@ class LiteLLMAIHandler(BaseAiHandler):
         return kwargs
 
     def add_litellm_callbacks(self, kwargs) -> dict:
+        probe = object()
         captured_extra = []
 
         def capture_logs(message):
             # Parsing the log message and context
             record = message.record
+            extra = record.get("extra") or {}
+            if extra.get("litellm_callbacks_probe") is not probe:
+                return
             log_entry = {}
-            if record.get('extra', None).get('command', None) is not None:
-                log_entry.update({"command": record['extra']["command"]})
-            if record.get('extra', {}).get('pr_url', None) is not None:
-                log_entry.update({"pr_url": record['extra']["pr_url"]})
+            if extra.get("command") is not None:
+                log_entry.update({"command": extra["command"]})
+            if extra.get("pr_url") is not None:
+                log_entry.update({"pr_url": extra["pr_url"]})
 
             # Append the log entry to the captured_logs list
             captured_extra.append(log_entry)
 
         # Adding the custom sink to Loguru
         handler_id = get_logger().add(capture_logs)
-        get_logger().debug("Capturing logs for litellm callbacks")
-        get_logger().remove(handler_id)
+        try:
+            get_logger().debug("Capturing logs for litellm callbacks",
+                               litellm_callbacks_probe=probe)
+        finally:
+            get_logger().remove(handler_id)
 
-        context = captured_extra[0] if len(captured_extra) > 0 else None
+        context = captured_extra[0] if len(captured_extra) > 0 else {}
 
         command = context.get("command", "unknown")
         pr_url = context.get("pr_url", "unknown")
@@ -484,6 +514,31 @@ class LiteLLMAIHandler(BaseAiHandler):
         """
         return get_settings().get("OPENAI.DEPLOYMENT_ID", None)
 
+    @staticmethod
+    def _resolve_cache_control_injection_points():
+        """Read and validate LITELLM.CACHE_CONTROL_INJECTION_POINTS for Anthropic prompt caching
+        via LiteLLM (https://docs.litellm.ai/docs/tutorials/prompt_caching).
+
+        Accepts a native TOML array in the [litellm] section of configuration.toml / .pr_agent.toml,
+        e.g. ``cache_control_injection_points = [{location = "message", role = "system"}]``; a
+        JSON-string form is also accepted so the value can be supplied via an environment-variable
+        override. Returns the parsed list, or None when unset/disabled. Raises ValueError on a
+        malformed value so the caller can surface it as a configuration error rather than retrying it.
+        """
+        cache_control_injection_points = get_settings().get("LITELLM.CACHE_CONTROL_INJECTION_POINTS", None)
+        # Only genuinely unset/disabled values short-circuit. Other falsy-but-malformed values
+        # (e.g. 0, False, {}) fall through to type validation below and raise ValueError.
+        if cache_control_injection_points in (None, "", []):
+            return None
+        if isinstance(cache_control_injection_points, str):
+            try:
+                cache_control_injection_points = json.loads(cache_control_injection_points)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"LITELLM.CACHE_CONTROL_INJECTION_POINTS contains invalid JSON: {str(e)}") from e
+        if not isinstance(cache_control_injection_points, list):
+            raise ValueError("LITELLM.CACHE_CONTROL_INJECTION_POINTS must be a JSON/TOML array")
+        return cache_control_injection_points
+
     @retry(
         retry=retry_if_exception_type(openai.APIError) & retry_if_not_exception_type(openai.RateLimitError),
         stop=stop_after_attempt(MODEL_RETRIES),
@@ -492,7 +547,12 @@ class LiteLLMAIHandler(BaseAiHandler):
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
         # Serialize env-var mutation + Bedrock call for IMDS mode to prevent concurrent
         # requests from interleaving os.environ credentials during asyncio.gather usage.
-        _bedrock_imds = self._aws_imds_mode and 'bedrock/' in model
+        # Validate config-derived kwargs before the try/except below, so a malformed value raises a
+        # ValueError config error instead of being wrapped as openai.APIError and retried.
+        cache_control_injection_points = self._resolve_cache_control_injection_points()
+        _bedrock_imds = self._aws_imds_mode and any(
+            provider in model for provider in ("bedrock/", "bedrock_mantle/")
+        )
         async with (self._aws_bedrock_lock if _bedrock_imds else contextlib.nullcontext()):
             if _bedrock_imds and not self._aws_imds_fell_back:
                 if not self._refresh_aws_imds_credentials() and self._aws_static_creds:
@@ -634,6 +694,17 @@ class LiteLLMAIHandler(BaseAiHandler):
                 if (model in self.claude_extended_thinking_models) and get_settings().config.get("enable_claude_extended_thinking", False):
                     kwargs = self._configure_claude_extended_thinking(model, kwargs)
 
+                # Optional output token limit; 0 = unset. Without max_tokens some
+                # providers apply a low service-side default (Bedrock Converse: 4096,
+                # which reasoning can fully consume, returning empty content).
+                # setdefault keeps the extended-thinking limit authoritative.
+                try:
+                    max_output_tokens = int(get_settings().config.get("max_output_tokens", 0))
+                except (TypeError, ValueError):
+                    max_output_tokens = 0
+                if max_output_tokens > 0:
+                    kwargs.setdefault("max_tokens", max_output_tokens)
+
                 if get_settings().litellm.get("enable_callbacks", False):
                     kwargs = self.add_litellm_callbacks(kwargs)
 
@@ -698,7 +769,22 @@ class LiteLLMAIHandler(BaseAiHandler):
                             get_logger().debug(
                                 f"add_user_to_requests: user field unsupported for {model}, skipped")
 
-                # Support for Bedrock custom inference profile via model_id
+                # Anthropic prompt caching via LiteLLM's cache_control_injection_points. The value
+                # is validated before the try/except (see above) so a malformed config surfaces as
+                # a ValueError instead of being retried. The kwarg is Anthropic-specific (Claude via
+                # the Anthropic API, Bedrock or Vertex), so gate on the model to avoid passing an
+                # unsupported param to other providers when litellm.drop_params is off. setdefault
+                # guards against overwriting a value already merged into kwargs.
+                if cache_control_injection_points:
+                    if isinstance(model, str) and "claude" in model.lower():
+                        kwargs.setdefault("cache_control_injection_points", cache_control_injection_points)
+                    else:
+                        get_logger().debug(
+                            f"cache_control_injection_points configured but not applied: {model} is not an "
+                            "Anthropic (Claude) model")
+
+                # Classic `bedrock/` calls use model_id for Bedrock Runtime inference profiles.
+                # Bedrock Mantle uses Projects, so `bedrock_mantle/` intentionally omits it.
                 model_id = get_settings().get("litellm.model_id")
                 if model_id and 'bedrock/' in model:
                     kwargs["model_id"] = model_id
