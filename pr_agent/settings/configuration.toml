@@ -165,6 +165,7 @@ dedup_include_resolved=true # include resolved and outdated review threads in du
 dedup_honor_decisions=true # honor maintainer ignore, accepted-risk, and fixed thread decisions
 dedup_bot_logins=[] # optional exact bot login allowlist; empty uses the authenticated GitHub identity
 dedup_similarity_threshold=0.88 # deterministic legacy semantic/code similarity threshold, from 0.0 to 1.0
+dedup_fail_closed=false # when true, skip inline publication instead of republishing if history retrieval fails
 focus_only_on_problems=true
 #
 extra_instructions = ""

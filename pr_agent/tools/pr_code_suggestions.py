@@ -31,7 +31,8 @@ from pr_agent.git_providers import (AzureDevopsProvider, GithubProvider,
 from pr_agent.git_providers.git_provider import get_main_pr_language, GitProvider
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
-from pr_agent.tools.github_suggestion_dedup import (filter_duplicate_suggestions,
+from pr_agent.tools.github_suggestion_dedup import (code_marker_for,
+                                                    filter_duplicate_suggestions,
                                                     marker_for)
 from pr_agent.tools.pr_description import insert_br_after_x_chars
 from pr_agent.tools.progress_comment import build_progress_comment
@@ -566,7 +567,13 @@ class PRCodeSuggestions:
         suggestions = data['code_suggestions']
         if (isinstance(self.git_provider, GithubProvider) and
                 get_settings().pr_code_suggestions.get('deduplicate_suggestions', True)):
-            if not getattr(self, '_code_suggestion_dedup_failed', False):
+            fail_closed = get_settings().pr_code_suggestions.get('dedup_fail_closed', False)
+            if getattr(self, '_code_suggestion_dedup_failed', False):
+                if fail_closed:
+                    get_logger().error("Skipping inline publication: deduplication history is unavailable and "
+                                       "dedup_fail_closed is enabled")
+                    return None
+            else:
                 try:
                     if not hasattr(self, '_code_suggestion_history'):
                         self._code_suggestion_history = self.git_provider.get_code_suggestion_history()
@@ -583,8 +590,12 @@ class PRCodeSuggestions:
                         f"Suppressed {len(data['code_suggestions']) - len(suggestions)} duplicate code suggestions")
                 except Exception as e:
                     self._code_suggestion_dedup_failed = True
-                    get_logger().exception("Failed to deduplicate GitHub code suggestions; publishing normally",
+                    get_logger().exception("Failed to deduplicate GitHub code suggestions",
                                            artifact={"error": e})
+                    if fail_closed:
+                        get_logger().error("Skipping inline publication: deduplication history is unavailable and "
+                                           "dedup_fail_closed is enabled")
+                        return None
 
         if not suggestions:
             get_logger().info('No suggestions found to improve this PR.')
@@ -616,6 +627,8 @@ class PRCodeSuggestions:
                     body = f"**Suggestion:** {content} [{label}]\n```suggestion\n" + new_code_snippet + "\n```"
                 if d.get('finding_fingerprint'):
                     body += f"\n\n{marker_for(d['finding_fingerprint'])}"
+                if d.get('finding_code_fingerprint'):
+                    body += f"\n{code_marker_for(d['finding_code_fingerprint'])}"
                 code_suggestions.append({'body': body, 'relevant_file': relevant_file,
                                          'relevant_lines_start': relevant_lines_start,
                                          'relevant_lines_end': relevant_lines_end,

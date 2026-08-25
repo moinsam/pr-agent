@@ -29,6 +29,7 @@ from ..algo.utils import (PRReviewHeader, Range, clip_tokens,
 from ..config_loader import get_settings
 from ..log import get_logger
 from ..servers.utils import RateLimitExceeded
+from ..tools.github_suggestion_dedup import preserved_markers
 from .git_provider import (MAX_FILES_ALLOWED_FULL, FilePatchInfo, GitProvider,
                            IncrementalPR, get_cached_global_settings)
 
@@ -766,7 +767,12 @@ class GithubProvider(GitProvider):
             try:
                 fixed_comment = copy.deepcopy(comment)  # avoid modifying the original comment dict for later logging
                 if "```suggestion" in comment["body"]:
+                    # The dedup markers sit after the suggestion block, so truncating here
+                    # would drop them and make this finding unmatchable on later runs.
+                    markers = preserved_markers(comment["body"])
                     fixed_comment["body"] = comment["body"].split("```suggestion")[0]
+                    if markers:
+                        fixed_comment["body"] = f"{fixed_comment['body'].rstrip()}\n\n{markers}"
                 if "start_line" in comment:
                     fixed_comment["line"] = comment["start_line"]
                     del fixed_comment["start_line"]

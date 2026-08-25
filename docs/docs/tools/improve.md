@@ -85,9 +85,14 @@ Teams with specific preferences can enable committable code comments mode in the
 
 GitHub inline suggestions are deduplicated by default. Before publishing, PR-Agent fetches all review comments (including
 outdated comments and replies) and review-thread resolution state. It considers only root findings from the authenticated
-PR-Agent bot, or from the exact logins configured in `dedup_bot_logins`. A hidden fingerprint marker is added to each new
-inline finding. The fingerprint combines the normalized repository-relative path, finding title/category/message, and the
-relevant symbol or nearby code, so it does not depend on line numbers.
+PR-Agent bot, or from the exact logins configured in `dedup_bot_logins`. Two hidden fingerprint markers are added to each
+new inline finding, and either one matching suppresses a repeat. Neither depends on line numbers:
+
+- `pr-agent-finding` combines the normalized repository-relative path, finding title/category/message, and the relevant
+  symbol or nearby code.
+- `pr-agent-finding-code` combines the path with the normalized existing and improved code. Model wording drifts between
+  runs at any `temperature` above zero, which changes the first fingerprint; the code of a finding is far more stable, so
+  this marker is usually the one that matches an earlier run.
 
 With `dedup_include_resolved=false`, equivalent unresolved findings are suppressed, including open threads whose original
 diff position GitHub has marked outdated. Resolved findings are reviewed again on the next run: if the issue remains or is
@@ -104,10 +109,14 @@ ignored. `ignore` and `accepted-risk` remain suppressed until the relevant seman
 reintroduction and may be published again. Resolving a GitHub thread does not mean accepted risk; use `ignore` or
 `accepted-risk` before resolving when that decision should remain durable.
 
-Matching is deterministic: the path must match, then the hidden fingerprint and normalized body and diff-hunk/nearby code
-are compared with a bounded similarity threshold. The similarity fallback also handles marked comments when model wording
-changes between runs. Major wording and code changes can still represent a new finding. If REST or GraphQL history
-retrieval fails, PR-Agent logs the failure and publishes normally. The discussion history is not sent to the model.
+Matching is deterministic: the path must match, then the hidden fingerprints, the normalized body, and the proposed code
+are compared with a bounded similarity threshold. The proposed code of an earlier comment is read back from its
+```suggestion block, or from the collapsed diff block used for findings that fall outside a hunk, and compared with the
+new `improved_code`. A short one-line fix must also agree with the surrounding code before it suppresses, since the same
+one-liner can legitimately recur at unrelated locations in the same file. Major wording and code changes can still
+represent a new finding. If REST or GraphQL history retrieval fails, PR-Agent logs the failure and publishes normally;
+set `dedup_fail_closed=true` to skip inline publication for that run instead of risking a full set of repeats. The
+discussion history is not sent to the model.
 
 For GitHub Actions, set `dedup_bot_logins=["github-actions[bot]"]`. For a custom bot or a migration from another bot
 identity, set it to an exact allowlist of the accounts whose prior root comments should be considered.
@@ -359,6 +368,10 @@ Note: Chunking is primarily relevant for large PRs. For most PRs (up to 600 line
       <tr>
         <td><b>dedup_bot_logins</b></td>
         <td>Optional exact list of bot logins whose root comments are recognized. When empty, the authenticated GitHub identity is used where available. Default is empty.</td>
+      </tr>
+      <tr>
+        <td><b>dedup_fail_closed</b></td>
+        <td>When history retrieval fails, skip inline publication for that run instead of publishing every finding again. Default is false.</td>
       </tr>
       <tr>
         <td><b>dedup_similarity_threshold</b></td>
