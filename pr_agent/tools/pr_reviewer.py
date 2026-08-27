@@ -24,6 +24,8 @@ from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (
     ModelType,
     PRReviewHeader,
+    PRReviewIdentity,
+    add_pr_review_identity,
     convert_to_markdown_v2,
     github_action_output,
     load_yaml,
@@ -137,6 +139,7 @@ class PRReviewer:
     async def run(self) -> None:
         init_run_details()
         progress_response = None
+        review_failed = False
         try:
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
@@ -200,14 +203,26 @@ class PRReviewer:
             review_thread_kwargs = {"as_thread": True} if self.git_provider.should_publish_review_as_thread() else {}
             if get_settings().pr_reviewer.persistent_comment and not self.incremental.is_incremental:
                 final_update_message = get_settings().pr_reviewer.final_update_message
-                self.git_provider.publish_persistent_comment(pr_review,
-                                                            initial_header=f"{PRReviewHeader.REGULAR.value} 🔍",
-                                                            update_header=True,
-                                                            final_update_message=final_update_message,
-                                                            **review_thread_kwargs)
+                self.git_provider.publish_persistent_comment(
+                    pr_review,
+                    initial_header=pr_review.split("\n", 1)[0],
+                    update_header=True,
+                    final_update_message=final_update_message,
+                    identity_marker=PRReviewIdentity.REGULAR.value,
+                    legacy_initial_header=f"{PRReviewHeader.REGULAR.value} 🔍",
+                    **review_thread_kwargs,
+                )
             else:
+                if self.git_provider.supports_review_comment_identity() is True:
+                    identity_marker = (
+                        PRReviewIdentity.INCREMENTAL.value
+                        if self.incremental.is_incremental
+                        else PRReviewIdentity.REGULAR.value
+                    )
+                    pr_review = add_pr_review_identity(pr_review, identity_marker)
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
         except Exception as e:
+            review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
@@ -217,6 +232,12 @@ class PRReviewer:
                     self.git_provider.remove_comment(progress_response)
                 except Exception as e:
                     get_logger().exception(f"Failed to remove review progress comment, error: {e}")
+            if (review_failed and get_settings().config.publish_output and
+                    not get_settings().config.get("is_auto_command", False)):
+                try:
+                    self.git_provider.publish_comment("Failed to review PR")
+                except Exception as e:
+                    get_logger().exception(f"Failed to publish review failure result, error: {e}")
 
     def _should_publish_review_no_suggestions(self, pr_review: str) -> bool:
         return get_settings().pr_reviewer.get('publish_output_no_suggestions', True) or "No major issues detected" not in pr_review

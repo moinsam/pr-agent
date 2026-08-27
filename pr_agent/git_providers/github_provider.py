@@ -23,9 +23,10 @@ from ..algo.inline_comment_dedup import (body_fingerprint, body_with_markers,
                                          get_inline_comment_store, has_marker)
 from ..algo.language_handler import is_valid_file
 from ..algo.types import EDIT_TYPE
-from ..algo.utils import (PRReviewHeader, Range, clip_tokens,
+from ..algo.utils import (Range, clip_tokens, comment_matches_any_identity,
                           find_line_number_of_relevant_line_in_file,
-                          load_large_diff, set_file_languages)
+                          get_pr_review_comment_identifiers, load_large_diff,
+                          set_file_languages)
 from ..config_loader import get_settings
 from ..log import get_logger
 from ..servers.utils import RateLimitExceeded
@@ -202,13 +203,9 @@ class GithubProvider(GitProvider):
             raise ValueError("At least one of full or incremental must be True")
         if not getattr(self, "comments", None):
             self.comments = list(self.pr.get_issue_comments())
-        prefixes = []
-        if full:
-            prefixes.append(PRReviewHeader.REGULAR.value)
-        if incremental:
-            prefixes.append(PRReviewHeader.INCREMENTAL.value)
+        identifiers = get_pr_review_comment_identifiers(full=full, incremental=incremental)
         for index in range(len(self.comments) - 1, -1, -1):
-            if any(self.comments[index].body.startswith(prefix) for prefix in prefixes):
+            if comment_matches_any_identity(self.comments[index].body, identifiers):
                 return self.comments[index]
         return None
 
@@ -395,11 +392,24 @@ class GithubProvider(GitProvider):
                                    initial_header: str,
                                    update_header: bool = True,
                                    name='review',
-                                   final_update_message=True):
+                                   final_update_message=True,
+                                   identity_marker: str | None = None,
+                                   legacy_initial_header: str | None = None):
         if get_settings().github.publish_as_check_run:
             if self._publish_check_run(pr_comment, name):
                 return
-        self.publish_persistent_comment_full(pr_comment, initial_header, update_header, name, final_update_message)
+        self.publish_persistent_comment_full(
+            pr_comment,
+            initial_header,
+            update_header,
+            name,
+            final_update_message,
+            identity_marker=identity_marker,
+            legacy_initial_header=legacy_initial_header,
+        )
+
+    def supports_review_comment_identity(self) -> bool:
+        return True
 
     def _publish_check_run(self, text: str, name: str) -> bool:
         if not getattr(self, 'last_commit_id', None):
@@ -631,6 +641,126 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to get review comments for an inline ask command", artifact={"comment_id": comment_id, "error": e})
             return []
 
+    def supports_thread_resolution(self) -> bool:
+        return True
+
+    def resolve_comment_thread(self, comment_id: int) -> bool:
+        """Resolve the review thread containing the given comment via GitHub GraphQL API."""
+        try:
+            owner, repo_name = self.repo.split("/")
+
+            # Get the comment's node_id via REST
+            headers, data = self.pr._requester.requestJsonAndCheck(
+                "GET", f"{self.base_url}/repos/{self.repo}/pulls/comments/{comment_id}"
+            )
+            comment_node_id = data.get("node_id", "")
+            if not comment_node_id:
+                get_logger().warning(f"No node_id found for comment {comment_id}")
+                return False
+
+            # Find the review thread containing this comment (paginated)
+            thread_id = None
+            is_already_resolved = False
+            cursor = None
+            while True:
+                after_clause = f', after: "{cursor}"' if cursor else ""
+                query = f"""
+                query {{
+                    repository(owner: "{owner}", name: "{repo_name}") {{
+                        pullRequest(number: {self.pr_num}) {{
+                            reviewThreads(first: 100{after_clause}) {{
+                                pageInfo {{ hasNextPage endCursor }}
+                                nodes {{
+                                    id
+                                    isResolved
+                                    comments(first: 100) {{
+                                        nodes {{
+                                            id
+                                        }}
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                """
+                response_tuple = self.github_client._Github__requester.requestJson(
+                    "POST", "/graphql", input={"query": query}
+                )
+                if not (isinstance(response_tuple, tuple) and len(response_tuple) == 3):
+                    get_logger().error("Unexpected GraphQL response format")
+                    return False
+
+                response_json = json.loads(response_tuple[2])
+                errors = response_json.get("errors")
+                if errors:
+                    get_logger().error(
+                        f"GraphQL errors querying review threads: {errors}"
+                    )
+                    return False
+                review_threads = (response_json.get("data", {}).get("repository", {})
+                                  .get("pullRequest", {}).get("reviewThreads", {}))
+                threads = review_threads.get("nodes", [])
+
+                for thread in threads:
+                    comment_ids = [c["id"] for c in thread.get("comments", {}).get("nodes", [])]
+                    if comment_node_id in comment_ids:
+                        if thread.get("isResolved"):
+                            is_already_resolved = True
+                        else:
+                            thread_id = thread["id"]
+                        break
+
+                if thread_id or is_already_resolved:
+                    break
+                page_info = review_threads.get("pageInfo", {})
+                if not page_info.get("hasNextPage"):
+                    break
+                cursor = page_info.get("endCursor")
+
+            if is_already_resolved:
+                get_logger().info(f"Thread for comment {comment_id} is already resolved")
+                return True
+
+            if not thread_id:
+                get_logger().warning(f"No thread found for comment {comment_id}")
+                return False
+
+            # Resolve the thread
+            mutation = f"""
+            mutation {{
+                resolveReviewThread(input: {{threadId: "{thread_id}"}}) {{
+                    thread {{
+                        isResolved
+                    }}
+                }}
+            }}
+            """
+            resolve_tuple = self.github_client._Github__requester.requestJson(
+                "POST", "/graphql", input={"query": mutation}
+            )
+            if not isinstance(resolve_tuple, tuple) or len(resolve_tuple) != 3:
+                get_logger().error(f"Unexpected mutation response format for thread {thread_id}: {type(resolve_tuple)}")
+                return False
+            resolve_json = json.loads(resolve_tuple[2])
+            errors = resolve_json.get("errors")
+            if errors:
+                get_logger().error(f"GraphQL errors resolving thread {thread_id}: {errors}")
+                return False
+            is_resolved = (resolve_json.get("data", {}).get("resolveReviewThread", {})
+                           .get("thread", {}).get("isResolved", False))
+            if not is_resolved:
+                get_logger().warning(
+                    f"Resolve mutation returned isResolved=false for thread "
+                    f"{thread_id} — possible permission issue"
+                )
+                return False
+            get_logger().info(f"Resolved review thread {thread_id}")
+            return True
+        except Exception as e:
+            get_logger().exception(f"Failed to resolve comment thread: {e}")
+            return False
+
     def get_code_suggestion_history(self) -> dict:
         """Return review comments and thread state used by GitHub /improve deduplication."""
         comments = []
@@ -708,10 +838,7 @@ class GithubProvider(GitProvider):
 
         # publish as a group the verified comments
         if verified_comments:
-            try:
-                self.pr.create_review(commit=self.last_commit_id, comments=verified_comments)
-            except:
-                pass
+            self.pr.create_review(commit=self.last_commit_id, comments=verified_comments)
 
         # try to publish one by one the invalid comments as a one-line code comment
         if invalid_comments and get_settings().github.try_fix_invalid_inline_comments:
@@ -1388,7 +1515,9 @@ class GithubProvider(GitProvider):
                 return sub_issues
 
 
-            issue_id = response_json.get("data", {}).get("repository", {}).get("issue", {}).get("id")
+            issue_id = (((response_json.get("data") or {})
+                        .get("repository") or {})
+                        .get("issue") or {}).get("id")
 
             if not issue_id:
                 get_logger().warning(f"Issue ID not found for {issue_url}")
@@ -1418,14 +1547,19 @@ class GithubProvider(GitProvider):
                 get_logger().error("Unexpected sub-issues response format", artifact={"response": sub_issues_response_tuple})
                 return sub_issues
 
-            if not sub_issues_response_json.get("data", {}).get("node", {}).get("subIssues"):
+            sub_issues_data = (((sub_issues_response_json.get("data") or {})
+                                .get("node") or {})
+                                .get("subIssues") or {})
+            if not sub_issues_data:
                 get_logger().error("Invalid sub-issues response structure")
                 return sub_issues
-    
-            nodes = sub_issues_response_json.get("data", {}).get("node", {}).get("subIssues", {}).get("nodes", [])
+
+            nodes = sub_issues_data.get("nodes") or []
             get_logger().info(f"Github Sub-issues fetched: {len(nodes)}", artifact={"nodes": nodes})
 
             for sub_issue in nodes:
+                if not sub_issue:
+                    continue
                 if "url" in sub_issue:
                     sub_issues.add(sub_issue["url"])
 

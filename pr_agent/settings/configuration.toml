@@ -108,6 +108,8 @@ require_ticket_analysis_review=true
 # general options
 publish_output_no_suggestions=true # Set to "false" if you only need the reviewer's remarks (not labels, not "security audit", etc.) and want to avoid noisy "No major issues detected" comments.
 persistent_comment=true
+# Visible base heading for full and incremental review comments. Identity is tracked separately.
+review_heading = "PR Reviewer Guide"
 inline_key_issues=false
 extra_instructions = ""
 num_max_findings = 3
@@ -155,6 +157,9 @@ async_ai_calls=true
 [pr_questions] # /ask #
 enable_help_text=false
 use_conversation_history=true
+# Enable to let /ask_line resolve the review thread when the LLM judges the
+# issue addressed. Note: also resolves threads started by human reviewers.
+resolve_threads=false
 extra_instructions = ""
 
 
@@ -301,6 +306,12 @@ expand_submodule_diffs = false
 feedback_on_draft_pr = false
 # Post the /review summary as a resolvable thread (discussion) instead of a plain note.
 publish_review_as_thread = false
+# When pr_code_suggestions.commitable_code_suggestions is true, queue each suggestion as a GitLab draft
+# note and publish them all together in one batch (like GitLab's own "start a review" flow) instead of
+# posting each as its own live discussion - and its own notification - as soon as it's created.
+publish_code_suggestions_as_review = false
+# Resolve the bot's own inline threads that a later push left on an outdated diff version.
+resolve_outdated_inline_threads = false
 pr_commands = [
     "/describe --pr_description.final_update_message=false",
     "/review",
@@ -379,6 +390,15 @@ enable_callbacks = false
 success_callback = []
 failure_callback = []
 service_callback = []
+# Optional: forward a fixed custom_llm_provider to LiteLLM, so a raw hosted model id
+# (e.g. "claude-sonnet-4-5") reaches the provider unchanged instead of being rewritten
+# by LiteLLM's prefix inference. Empty = let LiteLLM infer the provider from the model name.
+custom_llm_provider = ""
+# Force streaming when the request matches this provider AND its api_base contains one of the
+# substrings below. Some OpenAI-compatible endpoints return a response that LiteLLM cannot
+# normalize in non-streaming mode. Both must be set for the workaround to apply.
+force_streaming_custom_llm_provider = ""
+force_streaming_api_base_substrings = []
 callback_timeout_seconds = 30 # max seconds to wait for pending litellm callbacks to flush before exiting
 # Application inference profile ARN for classic `bedrock/` calls through the `bedrock-runtime` APIs.
 # Not used by `bedrock_mantle/`, which uses Projects for cost allocation.
