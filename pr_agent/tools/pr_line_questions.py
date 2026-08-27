@@ -28,6 +28,10 @@ class PR_LineQuestions:
         self.ai_handler = ai_handler()
         self.ai_handler.main_pr_language = self.main_pr_language
 
+        # only GitHub can resolve threads today; elsewhere the marker would be
+        # requested from the model and every answer would log a failed resolve
+        self.resolve_threads = (get_settings().pr_questions.get("resolve_threads", False)
+                                and self.git_provider.supports_thread_resolution())
         self.vars = {
             "title": self.git_provider.pr.title,
             "branch": self.git_provider.get_pr_branch(),
@@ -36,6 +40,7 @@ class PR_LineQuestions:
             "full_hunk": "",
             "selected_lines": "",
             "conversation_history": "",
+            "resolve_threads": self.resolve_threads,
             "extra_instructions": get_settings().pr_questions.extra_instructions,
         }
         self.token_handler = TokenHandler(self.git_provider.pr,
@@ -65,12 +70,16 @@ class PR_LineQuestions:
             self.vars["conversation_history"] = conversation_history
 
         self.patch_with_lines = ""
+        self.selected_lines = ""
         ask_diff = get_settings().get('ask_diff_hunk', "")
         line_start = get_settings().get('line_start', '')
         line_end = get_settings().get('line_end', '')
         side = get_settings().get('side', 'RIGHT')
         file_name = get_settings().get('file_name', '')
         comment_id = get_settings().get('comment_id', '')
+        if not comment_id:
+            self.resolve_threads = False
+            self.vars["resolve_threads"] = False
         if ask_diff:
             self.patch_with_lines, self.selected_lines = extract_hunk_lines_from_patch(ask_diff,
                                                                                        file_name,
@@ -86,8 +95,20 @@ class PR_LineQuestions:
                                                                                                line_start=line_start,
                                                                                                line_end=line_end,
                                                                                                side=side)
-        if self.patch_with_lines:
+        # A matched hunk always contributes its '@@' header; a miss leaves only the file
+        # title. Gating on selected_lines instead would also silence the case where GitHub
+        # truncates diff_hunk from the front but keeps the original header, which leaves the
+        # requested line outside the shortened body with the hunk itself still present.
+        hunk_found = any(line.startswith('@@') for line in self.patch_with_lines.splitlines())
+        if hunk_found:
             model_answer = await retry_with_fallback_models(self._get_prediction, model_type=ModelType.WEAK)
+
+            should_resolve = False
+            answer_stripped = model_answer.rstrip()
+            if self.resolve_threads and answer_stripped.endswith("[THREAD_RESOLVED]"):
+                should_resolve = True
+                model_answer = answer_stripped[:-len("[THREAD_RESOLVED]")].rstrip()
+
             # sanitize the answer so that no line will start with "/"
             model_answer_sanitized = model_answer.strip().replace("\n/", "\n /")
             if model_answer_sanitized.startswith("/"):
@@ -96,8 +117,24 @@ class PR_LineQuestions:
             get_logger().info('Preparing answer...')
             if comment_id:
                 self.git_provider.reply_to_comment_from_comment_id(comment_id, model_answer_sanitized)
+                if should_resolve:
+                    if self.git_provider.resolve_comment_thread(comment_id):
+                        get_logger().info(f"Resolved review thread for comment {comment_id}")
+                    else:
+                        get_logger().warning(f"Failed to resolve review thread for comment {comment_id}")
             else:
                 self.git_provider.publish_comment(model_answer_sanitized)
+        else:
+            get_logger().info("No hunk matched the requested range for "
+                              f"'{file_name}'; skipping the /ask_line model call")
+            # Without this the run is silent and the asker cannot tell us apart from a
+            # broken bot, so say why nothing was answered.
+            no_hunk_message = (f"Could not find the requested lines of `{file_name}` in this "
+                               "pull request's diff, so there is nothing to answer about.")
+            if comment_id:
+                self.git_provider.reply_to_comment_from_comment_id(comment_id, no_hunk_message)
+            else:
+                self.git_provider.publish_comment(no_hunk_message)
 
         return ""
         

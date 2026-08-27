@@ -29,11 +29,13 @@ To edit [configurations](#configuration-options) related to the `improve` tool, 
 /improve --pr_code_suggestions.some_config1=... --pr_code_suggestions.some_config2=...
 ```
 
-For example, you can choose to present all the suggestions as committable code comments, by running the following command:
+For example, you can present suggestions with verified replacement ranges as committable code comments by running:
 
 ```toml
 /improve --pr_code_suggestions.commitable_code_suggestions=true
 ```
+
+Suggestions whose replacement ranges cannot be verified remain regular comments without an apply action.
 
 ![improve](https://codium.ai/images/pr_agent/improve.png){width=512}
 
@@ -267,6 +269,19 @@ To enable it, use the following setting:
 [config]
 persistent_inline_comments = true
 ```
+
+### Batch-publishing committable suggestions on GitLab
+
+`Platforms supported: GitLab`
+
+By default, when `commitable_code_suggestions` is enabled, GitLab posts each suggestion as its own live discussion as soon as it's created - which means a separate notification (and email, if configured) per suggestion. To instead queue all suggestions and publish them together in a single batch, similar to using "start a review" in the GitLab UI, enable:
+
+```toml
+[gitlab]
+publish_code_suggestions_as_review = true
+```
+
+Suggestions are posted as GitLab draft notes (visible only to PR-Agent's user until published) and published together with a single API call once all suggestions have been queued. The suggestions remain fully committable either way - this setting only changes how they're delivered. The publish call is only made if at least one suggestion was actually queued, so a run with nothing to post won't accidentally publish unrelated drafts already pending on the MR.
 
 ### Self-review
 
